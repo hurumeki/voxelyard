@@ -99,14 +99,19 @@ export class Player {
 
   /**
    * 可変デルタを受け取り、固定タイムステップで物理を進める。
+   *
+   * 戻り値は実行したサブステップ数。0 のときは入力が一切消費されていないので、
+   * 呼び出し側はジャンプなどの単発入力を次フレームへ持ち越すこと
+   * （120Hz 表示だと 1/60 秒に満たないフレームが頻繁に発生する）。
+   *
    * @param dt 実時間の経過秒数
    * @param cameraYaw カメラの水平角。移動入力をワールド方向へ変換するのに使う
    */
-  update(world: World, dt: number, input: MoveInput, cameraYaw: number): void {
+  update(world: World, dt: number, input: MoveInput, cameraYaw: number): number {
     if (this.seated) {
       this.accumulator = 0;
       this.horizontalSpeed = 0;
-      return;
+      return 0;
     }
 
     this.accumulator += dt;
@@ -124,6 +129,7 @@ export class Player {
       this.accumulator = 0;
     }
     this.horizontalSpeed = steps > 0 ? moved / (steps * FIXED_DT) : 0;
+    return steps;
   }
 
   /** 1固定ステップ分の更新。戻り値は水平移動距離 */

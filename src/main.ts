@@ -22,6 +22,7 @@ import {
 import {
   deleteWorld,
   getSetting,
+  getWorld,
   listWorlds,
   loadVoxelBuffer,
   newWorldId,
@@ -42,15 +43,35 @@ type Settings = {
 
 const app = requireEl('#app');
 
+const bootMessage = el('div', { attrs: { id: 'boot-message' }, text: '起動しています…' });
+/** 読み込み失敗時にワールド一覧へ戻るためのボタン。通常は隠しておく */
+const bootBackButton = el('button', {
+  className: 'btn hidden',
+  text: 'ワールド一覧へ戻る',
+});
 const bootScreen = el('div', {
   className: 'screen',
   attrs: { id: 'screen-boot' },
   children: [
     el('div', { attrs: { id: 'boot-title' }, text: 'VoxelYard' }),
-    el('div', { attrs: { id: 'boot-message' }, text: '起動しています…' }),
+    bootMessage,
+    bootBackButton,
   ],
 });
-const bootMessage = bootScreen.querySelector<HTMLElement>('#boot-message')!;
+
+/** 読み込み中の表示（復帰ボタンは隠す） */
+function showBootProgress(message: string): void {
+  bootMessage.textContent = message;
+  bootBackButton.classList.add('hidden');
+  showScreen('boot');
+}
+
+/** 失敗の表示（復帰ボタンを出して行き止まりにしない） */
+function showBootError(message: string, allowBack: boolean): void {
+  bootMessage.textContent = message;
+  bootBackButton.classList.toggle('hidden', !allowBack);
+  showScreen('boot');
+}
 
 const worldsScreen = el('div', {
   className: 'screen hidden',
@@ -84,8 +105,10 @@ const forceWebGL = new URLSearchParams(location.search).has('webgl');
 async function main(): Promise<void> {
   // WebGPU 対応チェック（iPadOS 26 以降が必要）
   if (!('gpu' in navigator) && !forceWebGL) {
-    bootMessage.textContent =
-      'この端末では動作しません。\n\nVoxelYard は WebGPU を使用します。iPadOS 26 以降にアップデートしてから、もう一度お試しください。';
+    showBootError(
+      'この端末では動作しません。\n\nVoxelYard は WebGPU を使用します。iPadOS 26 以降にアップデートしてから、もう一度お試しください。',
+      false,
+    );
     return;
   }
 
@@ -138,6 +161,7 @@ async function main(): Promise<void> {
 
   buildWorldsScreen();
   buildOrientationOverlay();
+  bootBackButton.addEventListener('click', () => void exitToWorldList());
 
   function buildWorldsScreen(): void {
     const title = el('h1', { text: 'VoxelYard' });
@@ -241,21 +265,33 @@ async function main(): Promise<void> {
 
   // ------------------------------------------------------------ ゲーム開始
 
+  /**
+   * ワールドを開く。
+   * Game.create() は WebGPURenderer と TouchControls を作るので、
+   * 二重に走ると同じビューポートに描画コンテキストが2つできてしまう。
+   * 読み込み中は再入を弾く。
+   */
+  let openingWorld = false;
+
   async function openWorld(worldId: string): Promise<void> {
-    const all = await listWorlds();
-    const meta = all.find((m) => m.worldId === worldId);
-    if (!meta) {
-      toast('ワールドが見つかりませんでした。');
-      return;
-    }
-
-    showScreen('boot');
-    bootMessage.textContent = 'ワールドを読み込んでいます…';
-
-    const buffer = await loadVoxelBuffer(worldId);
-    const world = new World(buffer ?? undefined);
+    if (openingWorld) return;
+    openingWorld = true;
+    // 読み込み中は前のワールドのループを止めておく
+    state.game?.stop();
+    showBootProgress('ワールドを読み込んでいます…');
 
     try {
+      const meta = await getWorld(worldId);
+      if (!meta) {
+        toast('ワールドが見つかりませんでした。');
+        await refreshWorldList();
+        showScreen('worlds');
+        return;
+      }
+
+      const buffer = await loadVoxelBuffer(worldId);
+      const world = new World(buffer ?? undefined);
+
       if (!state.game) {
         state.game = await Game.create(
           {
@@ -273,21 +309,26 @@ async function main(): Promise<void> {
       } else {
         state.game.applyWorld(world, meta);
       }
+
+      state.currentWorldId = worldId;
+      await setSetting('lastOpenedWorldId', worldId);
+
+      showScreen('game');
+      state.game.resize();
+      state.game.setMode('normal');
+      state.game.start();
+      updateOrientationOverlay();
     } catch (err) {
       console.error(err);
-      bootMessage.textContent =
-        '3D描画の初期化に失敗しました。\n\niPadOS 26 以降であること、Safari の WebGPU が有効であることを確認してください。';
-      return;
+      // 3D初期化とデータ読み込みのどちらで失敗したかで案内を変える
+      const message = state.game
+        ? `ワールドの読み込みに失敗しました。\n\n${err instanceof Error ? err.message : String(err)}`
+        : '3D描画の初期化に失敗しました。\n\niPadOS 26 以降であること、Safari の WebGPU が有効であることを確認してください。';
+      await refreshWorldList().catch(() => undefined);
+      showBootError(message, true);
+    } finally {
+      openingWorld = false;
     }
-
-    state.currentWorldId = worldId;
-    await setSetting('lastOpenedWorldId', worldId);
-
-    showScreen('game');
-    state.game.resize();
-    state.game.setMode('normal');
-    state.game.start();
-    updateOrientationOverlay();
   }
 
   async function exitToWorldList(): Promise<void> {
@@ -553,6 +594,8 @@ registerServiceWorker();
 
 void main().catch((err: unknown) => {
   console.error(err);
-  showScreen('boot');
-  bootMessage.textContent = `起動に失敗しました。\n\n${err instanceof Error ? err.message : String(err)}`;
+  showBootError(
+    `起動に失敗しました。\n\n${err instanceof Error ? err.message : String(err)}`,
+    false,
+  );
 });

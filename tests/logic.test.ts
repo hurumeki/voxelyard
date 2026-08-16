@@ -365,3 +365,37 @@ test('ドアが開いている間は通行できる', () => {
   w.toggleDoor({ x: 31, y: 0, z: 20 });
   assert.ok(walk() < 20, '開いたドアを通れていない');
 });
+
+test('サブステップが動かないフレームでは入力が消費されない', () => {
+  const w = new World();
+  const p = new Player();
+  p.reset(32.5, 0, 32.5, 0);
+  p.resetAccumulator();
+  // dt が固定ステップ（1/60）未満なので、このフレームでは物理が1回も進まない
+  const steps = p.update(w, 1 / 240, { forward: 0, strafe: 0, jumpQueued: true }, 0);
+  assert.equal(steps, 0);
+  assert.equal(p.y, 0);
+});
+
+test('120Hz のフレームでもジャンプ入力を取りこぼさない', () => {
+  const w = new World();
+  const p = new Player();
+  p.reset(32.5, 0, 32.5, 0);
+  for (let i = 0; i < 30; i++) {
+    p.update(w, 1 / 120, { forward: 0, strafe: 0, jumpQueued: false }, 0);
+  }
+  assert.equal(p.onGround, true);
+
+  // アキュムレータを空にしておくと、次のフレームは必ずサブステップ0になる。
+  // Game.frame と同じく「サブステップが動いたフレームでのみ入力を消費する」扱いにする。
+  p.resetAccumulator();
+  let jumpQueued = true;
+  let maxY = 0;
+  for (let i = 0; i < 120; i++) {
+    const steps = p.update(w, 1 / 120, { forward: 0, strafe: 0, jumpQueued }, 0);
+    if (steps > 0) jumpQueued = false;
+    maxY = Math.max(maxY, p.y);
+  }
+  // 通常ブロック1段（1m）を越える高さまで跳べていること
+  assert.ok(maxY > 1.0, `ジャンプが取りこぼされている maxY=${maxY}`);
+});

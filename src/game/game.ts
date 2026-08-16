@@ -77,7 +77,12 @@ export class Game {
 
   private lastSaveAt = 0;
   private saveTimer: number | undefined;
-  private savingPromise: Promise<void> | null = null;
+  /**
+   * 保存を直列化するためのチェーン。
+   * 進行中の保存を待たずに使い回すと、その書き込みに含まれていない変更を
+   * 「保存済み」として扱ってしまうため、必ず後ろに繋いで書き直す。
+   */
+  private saveChain: Promise<void> = Promise.resolve();
 
   private readonly tmpVec = new Vector3();
 
@@ -204,7 +209,7 @@ export class Game {
       this.standUp();
     }
 
-    this.player.update(
+    const steps = this.player.update(
       this.world,
       dt,
       {
@@ -214,7 +219,9 @@ export class Game {
       },
       this.camera.movementYaw,
     );
-    this.jumpQueued = false;
+    // 物理が1ステップも進まなかったフレームでは入力が消費されていないので、
+    // ジャンプは次フレームへ持ち越す（120Hz 表示だと半分近くのフレームが該当する）。
+    if (steps > 0) this.jumpQueued = false;
 
     this.camera.update(this.world, this.player, dt);
     this.playerModel.update(
@@ -470,12 +477,24 @@ export class Game {
     void this.save();
   }
 
-  /** 実際に保存する。ダーティフラグが立っていなければスキップ */
-  async save(force = false): Promise<void> {
-    if (!force && !this.world.isDirty()) return;
-    if (this.savingPromise) return this.savingPromise;
+  /**
+   * 保存する。ダーティフラグが立っていなければスキップ（force で強制）。
+   *
+   * 返した Promise が解決した時点で「この呼び出し時点の状態が書き込み済み」で
+   * あることを保証する。進行中の保存があればその後ろに繋ぐ。
+   */
+  save(force = false): Promise<void> {
+    if (!force && !this.world.isDirty()) return this.saveChain;
 
     window.clearTimeout(this.saveTimer);
+    const next = this.saveChain.then(() => this.writeSnapshot());
+    // チェーンが失敗しても後続の保存が止まらないようにする
+    this.saveChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** 現在の状態を IndexedDB へ書き込む */
+  private async writeSnapshot(): Promise<void> {
     this.world.clearDirty();
     this.lastSaveAt = performance.now();
 
@@ -489,16 +508,13 @@ export class Game {
     };
     this.meta = meta;
 
-    this.savingPromise = saveWorld(meta, this.world.voxels.cloneBuffer())
-      .catch((err: unknown) => {
-        this.world.markDirty();
-        console.error('ワールドの保存に失敗しました', err);
-        toast('保存に失敗しました。空き容量を確認してください。');
-      })
-      .finally(() => {
-        this.savingPromise = null;
-      });
-    return this.savingPromise;
+    try {
+      await saveWorld(meta, this.world.voxels.cloneBuffer());
+    } catch (err: unknown) {
+      this.world.markDirty();
+      console.error('ワールドの保存に失敗しました', err);
+      toast('保存に失敗しました。空き容量を確認してください。');
+    }
   }
 
   // ---------------------------------------------------------------- 後始末
