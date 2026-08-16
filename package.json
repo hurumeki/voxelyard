@@ -1,0 +1,33 @@
+{
+  "name": "voxelyard",
+  "version": "1.0.0",
+  "description": "ボクセルサンドボックス PWA（iPad Pro 12.9\" 3rd gen 向け・私用）",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run gen:assets && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "gen:assets": "node scripts/gen-assets.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hurumeki/voxelyard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hurumeki/voxelyard/issues"
+  },
+  "homepage": "https://github.com/hurumeki/voxelyard#readme",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/three": "^0.185.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vite-plugin-pwa": "^1.3.0"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "private": true,
+  "type": "module"
+}
