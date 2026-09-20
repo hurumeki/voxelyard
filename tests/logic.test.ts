@@ -26,6 +26,7 @@ import {
   ghostColorFor,
   placeFailMessage,
 } from '../src/game/placeFeedback.ts';
+import { MOVE_ZONE_RATIO, isInMoveZone } from '../src/input/moveZone.ts';
 import type { PlaceFailure } from '../src/game/world.ts';
 import type { WorldMeta } from '../src/storage/db.ts';
 
@@ -467,4 +468,29 @@ test('向き直りは近い方へ回る', () => {
   // 補間の割合どおりに近づく
   assert.ok(Math.abs(approachAngle(0, Math.PI / 2, 0.5) - Math.PI / 4) < 1e-9);
   assert.ok(Math.abs(approachAngle(1.2, 1.2, 1) - 1.2) < 1e-9);
+});
+
+// ---------------------------------------------------------------- 移動エリア
+
+test('移動スティックは画面左下の一角だけで起動する', () => {
+  // iPad Pro 12.9" 横向き相当。surface が画面いっぱいとは限らないので left/top も与える
+  const rect = { left: 20, top: 10, width: 1366, height: 1024 };
+  const zoneX = rect.left + rect.width * MOVE_ZONE_RATIO;
+  const zoneY = rect.top + rect.height * (1 - MOVE_ZONE_RATIO);
+
+  // 左下の隅は移動
+  assert.ok(isInMoveZone(rect.left + 40, rect.top + rect.height - 40, rect));
+  // 画面中央のタップはブロック操作（これが今回の修正点）
+  assert.ok(!isInMoveZone(rect.left + rect.width / 2, rect.top + rect.height / 2, rect));
+  // 左半分でも上寄り・中段ならブロック操作
+  assert.ok(!isInMoveZone(rect.left + 40, rect.top + 40, rect));
+  assert.ok(!isInMoveZone(rect.left + 40, rect.top + rect.height / 2, rect));
+  // 右下（ジャンプ・ホットバー側）も移動ではない
+  assert.ok(!isInMoveZone(rect.left + rect.width - 40, rect.top + rect.height - 40, rect));
+
+  // 境界は移動エリアに含めない
+  assert.ok(!isInMoveZone(zoneX, rect.top + rect.height - 1, rect));
+  assert.ok(isInMoveZone(zoneX - 1, rect.top + rect.height - 1, rect));
+  assert.ok(!isInMoveZone(rect.left + 1, zoneY, rect));
+  assert.ok(isInMoveZone(rect.left + 1, zoneY + 1, rect));
 });
