@@ -10,7 +10,23 @@ import test from 'node:test';
 import { World } from '../src/game/world.ts';
 import { Player } from '../src/physics/player.ts';
 import { raycastWorld } from '../src/game/raycast.ts';
-import { buildExport, exportFilename, importWorld, sanitizeFilename } from '../src/storage/worldIO.ts';
+import {
+  FORMAT_VERSION,
+  buildExport,
+  exportFilename,
+  importWorld,
+  sanitizeFilename,
+} from '../src/storage/worldIO.ts';
+import {
+  BLOCK_COLORS,
+  TINT_NONE,
+  TINT_REFERENCE_LUMINANCE,
+  applyTintLinear,
+  blockColorIdOf,
+  blockColorIndexOf,
+  normalizeTint,
+  tintLinearRgb,
+} from '../src/core/blockColors.ts';
 import {
   CELL_COUNT,
   approachAngle,
@@ -247,7 +263,7 @@ test('JSON は疎な配列で書き出され、従属セルは occupies に集�
   w.place('table_wood', { x: 11, y: 0, z: 20 }, 2);
 
   const json = buildExport(w, META);
-  assert.equal(json.formatVersion, 1);
+  assert.equal(json.formatVersion, FORMAT_VERSION);
   assert.equal(json.app, 'VoxelYard');
   assert.deepEqual(json.gridSize, { width: 64, depth: 64, height: 32 });
   // テーブルは1エントリのみ（従属セルは出力しない）
@@ -280,6 +296,10 @@ test('JSON は往復しても内容が保たれる', () => {
     Array.from(result.world.voxels.cells),
     Array.from(w.voxels.cells),
   );
+  assert.deepEqual(
+    Array.from(result.world.voxels.tints),
+    Array.from(w.voxels.tints),
+  );
 });
 
 test('不正なブロックはスキップされ、読み込み全体は失敗しない', () => {
@@ -310,10 +330,130 @@ test('不正なブロックはスキップされ、読み込み全体は失敗�
 });
 
 test('gridSize や formatVersion が違えば読み込みを拒否する', () => {
-  assert.throws(() => importWorld({ formatVersion: 2, gridSize: {}, blocks: [] }));
+  assert.throws(() => importWorld({ formatVersion: 99, gridSize: {}, blocks: [] }));
   assert.throws(() =>
     importWorld({ formatVersion: 1, gridSize: { width: 32, depth: 32, height: 16 }, blocks: [] }),
   );
+});
+
+// ---------------------------------------------------------------- ブロックの色
+
+test('色を指定して置くと占有セルすべてに色が入り、壊すと色も消える', () => {
+  const w = new World();
+  const red = blockColorIndexOf('red');
+  assert.ok(red > 0);
+
+  w.place('table_wood', { x: 11, y: 0, z: 20 }, 2, red);
+  // テーブルは2セル占有。従属セル側にも同じ色が入る
+  assert.equal(w.voxels.getTint(11, 0, 20), red);
+  assert.equal(w.voxels.getTint(11, 0, 21), red);
+
+  w.remove({ x: 11, y: 0, z: 21 });
+  assert.equal(w.voxels.getTint(11, 0, 20), TINT_NONE);
+  assert.equal(w.voxels.getTint(11, 0, 21), TINT_NONE);
+});
+
+test('色ぬりはブロック全体に適用され、同じ色なら変更なしを返す', () => {
+  const w = new World();
+  const blue = blockColorIndexOf('blue');
+  w.place('table_wood', { x: 11, y: 0, z: 20 }, 2);
+
+  // 従属セル側をタップしても基準セルごと塗る
+  assert.equal(w.paint({ x: 11, y: 0, z: 21 }, blue), true);
+  assert.equal(w.voxels.getTint(11, 0, 20), blue);
+  assert.equal(w.voxels.getTint(11, 0, 21), blue);
+
+  // 同じ色をもう一度塗っても変化なし（保存・再構築を起こさない）
+  assert.equal(w.paint({ x: 11, y: 0, z: 20 }, blue), false);
+  // 素の色へ戻せる
+  assert.equal(w.paint({ x: 11, y: 0, z: 20 }, TINT_NONE), true);
+  assert.equal(w.voxels.getTint(11, 0, 20), TINT_NONE);
+});
+
+test('空セルは塗れない', () => {
+  const w = new World();
+  assert.equal(w.paint({ x: 5, y: 0, z: 5 }, blockColorIndexOf('green')), false);
+});
+
+test('未知の色番号は素の色に丸められる', () => {
+  const w = new World();
+  w.place('wood_natural', { x: 4, y: 0, z: 4 }, 0, 9999);
+  assert.equal(w.voxels.getTint(4, 0, 4), TINT_NONE);
+  assert.equal(normalizeTint(-1), TINT_NONE);
+  assert.equal(normalizeTint(1.5), TINT_NONE);
+  assert.equal(normalizeTint(BLOCK_COLORS.length), BLOCK_COLORS.length);
+  assert.equal(normalizeTint(BLOCK_COLORS.length + 1), TINT_NONE);
+});
+
+test('色は JSON に書き出され、往復しても保たれる', () => {
+  const w = new World();
+  const yellow = blockColorIndexOf('yellow');
+  w.place('wood_natural', { x: 10, y: 0, z: 10 }, 0, yellow);
+  w.place('stone_natural', { x: 11, y: 0, z: 10 }, 0); // 素の色
+
+  const json = buildExport(w, META);
+  const painted = json.blocks.find((b) => b.blockId === 'wood_natural')!;
+  const plain = json.blocks.find((b) => b.blockId === 'stone_natural')!;
+  assert.equal(painted.color, 'yellow');
+  // 素の色のブロックには color を書かない
+  assert.equal(plain.color, undefined);
+
+  const result = importWorld(JSON.parse(JSON.stringify(json)));
+  assert.equal(result.skipped, 0);
+  assert.equal(result.world.voxels.getTint(10, 0, 10), yellow);
+  assert.equal(result.world.voxels.getTint(11, 0, 10), TINT_NONE);
+});
+
+test('色のない v1 の JSON も読み込める', () => {
+  const result = importWorld({
+    formatVersion: 1,
+    app: 'VoxelYard',
+    world: { name: 'x', createdAt: '', updatedAt: '' },
+    gridSize: { width: 64, depth: 64, height: 32 },
+    blocks: [{ x: 1, y: 0, z: 1, blockId: 'wood_natural', rotationY: 0 }],
+  });
+  assert.equal(result.placed, 1);
+  assert.equal(result.world.voxels.getTint(1, 0, 1), TINT_NONE);
+});
+
+test('未知の色 id のブロックは素の色で読み込まれる（スキップしない）', () => {
+  const result = importWorld({
+    formatVersion: 2,
+    app: 'VoxelYard',
+    world: { name: 'x', createdAt: '', updatedAt: '' },
+    gridSize: { width: 64, depth: 64, height: 32 },
+    blocks: [{ x: 1, y: 0, z: 1, blockId: 'wood_natural', rotationY: 0, color: 'ultraviolet' }],
+  });
+  assert.equal(result.placed, 1);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.world.voxels.getTint(1, 0, 1), TINT_NONE);
+});
+
+test('色番号と色 id は往復する', () => {
+  assert.equal(blockColorIdOf(TINT_NONE), null);
+  for (let i = 1; i <= BLOCK_COLORS.length; i++) {
+    const id = blockColorIdOf(i);
+    assert.ok(id);
+    assert.equal(blockColorIndexOf(id), i);
+  }
+  assert.equal(blockColorIndexOf('存在しない色'), TINT_NONE);
+});
+
+test('基準輝度のテクセルはパレット色そのものになり、模様の明暗は残る', () => {
+  const red = blockColorIndexOf('red');
+  const expected = tintLinearRgb(red);
+
+  // 輝度がちょうど基準値のグレーはパレット色になる
+  const mid = TINT_REFERENCE_LUMINANCE;
+  const tinted = applyTintLinear([mid, mid, mid], red);
+  tinted.forEach((v, i) => assert.ok(Math.abs(v - expected[i]) < 1e-6));
+
+  // 暗いテクセルは暗いまま（木目・石目が残る）
+  const dark = applyTintLinear([mid * 0.5, mid * 0.5, mid * 0.5], red);
+  assert.ok(dark[0] < tinted[0]);
+
+  // 着色なしはテクセルをそのまま返す
+  assert.deepEqual(applyTintLinear([0.1, 0.2, 0.3], TINT_NONE), [0.1, 0.2, 0.3]);
 });
 
 test('ファイル名がサニタイズされる', () => {

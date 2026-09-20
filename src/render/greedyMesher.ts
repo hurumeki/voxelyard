@@ -3,6 +3,7 @@
  *
  * - 不透明な立方体ブロックのみを対象とする（半ブロック・階段・窓・家具は対象外）
  * - 他のブロックに接している面は生成しない
+ * - 色（着色）が違うブロックは結合しない（結合キーに色番号を含める）
  * - 面の向きに応じた明度を頂点カラーへ直接書き込む（カスタムシェーダーを書かないため）
  *
  * 面ごとのテクスチャは DataArrayTexture のレイヤー番号として頂点属性 texLayer に載せる。
@@ -11,9 +12,11 @@
 import { BufferAttribute, BufferGeometry } from 'three/webgpu';
 import { CHUNK_SIZE, GRID_Y } from '../core/coords.ts';
 import { blockDefByIndex, isOpaqueFullCube } from '../core/blocks.ts';
+import { MASK_BLOCK_ID } from '../core/voxelData.ts';
 import type { VoxelData } from '../core/voxelData.ts';
-import { TEX_LAYER_ATTRIBUTE } from './materials.ts';
+import { TEX_LAYER_ATTRIBUTE, TINT_ATTRIBUTE } from './materials.ts';
 import { textureLayerIndex } from './textures.ts';
+import { tintAttributeValue } from './tintAttribute.ts';
 
 /** 面の向きごとの明度（仕様書の推奨値） */
 export const FACE_BRIGHTNESS = {
@@ -43,6 +46,16 @@ const FACE_DIRS: readonly FaceDir[] = [
   { axis: 2, sign: -1, normal: [0, 0, -1], brightness: FACE_BRIGHTNESS.sideZ, texSlot: 'side' },
 ];
 
+/**
+ * mask に載せる値。blockId（10bit）と色番号を1つの整数にまとめる。
+ * 色が違う面は結合してはいけないので、結合判定のキーに色も含める。
+ */
+const MASK_TINT_SHIFT = 10;
+
+function maskKey(blockIndex: number, tint: number): number {
+  return blockIndex | (tint << MASK_TINT_SHIFT);
+}
+
 /** ブロックインデックス → 面スロット → テクスチャレイヤー番号のキャッシュ */
 const layerCache = new Map<number, { top: number; bottom: number; side: number }>();
 
@@ -62,12 +75,13 @@ function layersFor(blockIndex: number): { top: number; bottom: number; side: num
   return entry;
 }
 
-/** Greedy Meshing の対象となるブロックか */
-function greedyBlockIndexAt(voxels: VoxelData, x: number, y: number, z: number): number {
+/** Greedy Meshing の対象なら mask に載せる値、対象外なら 0 */
+function greedyMaskKeyAt(voxels: VoxelData, x: number, y: number, z: number): number {
   const idx = voxels.getBlockId(x, y, z);
   if (idx === 0) return 0;
   const def = blockDefByIndex(idx);
-  return def && def.render === 'greedy' ? idx : 0;
+  if (!def || def.render !== 'greedy') return 0;
+  return maskKey(idx, voxels.getTint(x, y, z));
 }
 
 /**
@@ -86,6 +100,7 @@ type MeshBuffers = {
   uvs: number[];
   colors: number[];
   layers: number[];
+  tints: number[];
   indices: number[];
 };
 
@@ -106,6 +121,7 @@ export function buildChunkGeometry(
     uvs: [],
     colors: [],
     layers: [],
+    tints: [],
     indices: [],
   };
 
@@ -128,15 +144,15 @@ export function buildChunkGeometry(
           cell[a1] = base[a1] + i;
           cell[a2] = base[a2] + j;
 
-          const blockIndex = greedyBlockIndexAt(voxels, cell[0], cell[1], cell[2]);
-          if (blockIndex === 0) continue;
+          const key = greedyMaskKeyAt(voxels, cell[0], cell[1], cell[2]);
+          if (key === 0) continue;
 
           const nx = cell[0] + dir.normal[0];
           const ny = cell[1] + dir.normal[1];
           const nz = cell[2] + dir.normal[2];
           if (faceHidden(voxels, nx, ny, nz)) continue;
 
-          mask[i * CHUNK_SIZE + j] = blockIndex;
+          mask[i * CHUNK_SIZE + j] = key;
           hasAny = true;
         }
       }
@@ -165,21 +181,23 @@ function emitMergedQuads(
 
   for (let i = 0; i < CHUNK_SIZE; i++) {
     for (let j = 0; j < CHUNK_SIZE; ) {
-      const blockIndex = mask[i * CHUNK_SIZE + j];
-      if (blockIndex === 0) {
+      const key = mask[i * CHUNK_SIZE + j];
+      if (key === 0) {
         j++;
         continue;
       }
+      const blockIndex = key & MASK_BLOCK_ID;
+      const tint = key >>> MASK_TINT_SHIFT;
 
       // j 方向（a2軸）に伸ばす
       let h = 1;
-      while (j + h < CHUNK_SIZE && mask[i * CHUNK_SIZE + j + h] === blockIndex) h++;
+      while (j + h < CHUNK_SIZE && mask[i * CHUNK_SIZE + j + h] === key) h++;
 
       // i 方向（a1軸）に伸ばす
       let w = 1;
       outer: while (i + w < CHUNK_SIZE) {
         for (let k = 0; k < h; k++) {
-          if (mask[(i + w) * CHUNK_SIZE + j + k] !== blockIndex) break outer;
+          if (mask[(i + w) * CHUNK_SIZE + j + k] !== key) break outer;
         }
         w++;
       }
@@ -197,7 +215,7 @@ function emitMergedQuads(
       layers.side = l.side;
       const texLayer = layers[dir.texSlot];
 
-      pushQuad(buf, dir, a1, a2, base, slice, i, j, w, h, texLayer, axis);
+      pushQuad(buf, dir, a1, a2, base, slice, i, j, w, h, texLayer, axis, tint);
 
       j += h;
     }
@@ -217,6 +235,7 @@ function pushQuad(
   h: number,
   texLayer: number,
   axis: 0 | 1 | 2,
+  tint: number,
 ): void {
   // 面の位置。+方向の面はセルの上端、-方向の面はセルの下端
   const level = base[axis] + slice + (dir.sign === 1 ? 1 : 0);
@@ -247,6 +266,7 @@ function pushQuad(
 
   const startVertex = buf.positions.length / 3;
   const b = dir.brightness;
+  const paint = tintAttributeValue(tint);
   for (let v = 0; v < 4; v++) {
     const p = quad[v];
     buf.positions.push(p[0], p[1], p[2]);
@@ -254,6 +274,7 @@ function pushQuad(
     buf.uvs.push(uvQuad[v][0], uvQuad[v][1]);
     buf.colors.push(b, b, b);
     buf.layers.push(texLayer);
+    buf.tints.push(paint[0], paint[1], paint[2], paint[3]);
   }
   buf.indices.push(
     startVertex,
@@ -272,6 +293,7 @@ function toGeometry(buf: MeshBuffers): BufferGeometry {
   geo.setAttribute('uv', new BufferAttribute(new Float32Array(buf.uvs), 2));
   geo.setAttribute('color', new BufferAttribute(new Float32Array(buf.colors), 3));
   geo.setAttribute(TEX_LAYER_ATTRIBUTE, new BufferAttribute(new Float32Array(buf.layers), 1));
+  geo.setAttribute(TINT_ATTRIBUTE, new BufferAttribute(new Float32Array(buf.tints), 4));
   geo.setIndex(new BufferAttribute(new Uint32Array(buf.indices), 1));
   geo.computeBoundingSphere();
   geo.computeBoundingBox();

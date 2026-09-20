@@ -16,7 +16,9 @@ import {
   BufferGeometry,
   DirectionalLight,
   DoubleSide,
+  DynamicDrawUsage,
   Group,
+  InstancedBufferAttribute,
   InstancedMesh,
   Matrix4,
   Mesh,
@@ -40,18 +42,30 @@ import type { World } from '../game/world.ts';
 import { buildChunkGeometry, FACE_BRIGHTNESS } from './greedyMesher.ts';
 import { buildBlockGeometrySet } from './blockGeometries.ts';
 import type { BlockGeometrySet } from './blockGeometries.ts';
-import { createOpaqueBlockMaterial, createTransparentBlockMaterial, TEX_LAYER_ATTRIBUTE } from './materials.ts';
+import {
+  createOpaqueBlockMaterial,
+  createTransparentBlockMaterial,
+  TEX_LAYER_ATTRIBUTE,
+  TINT_ATTRIBUTE,
+} from './materials.ts';
 import { textureLayerIndex } from './textures.ts';
+import { TINT_NONE, tintAttributeValue } from './tintAttribute.ts';
 
 const DEG90 = Math.PI / 2;
 
 type InstanceGroup = {
   readonly def: BlockDef;
   readonly variant: 'solid' | 'solidOpen' | 'glass';
+  /** InstancedMesh 専用の複製。着色をインスタンス属性として持たせるため共有しない */
   readonly geometry: TBufferGeometry;
   readonly material: MeshLambertNodeMaterial;
   mesh: InstancedMesh;
+  /** インスタンスごとの着色（vec4 × インスタンス数） */
+  tintAttribute: InstancedBufferAttribute;
 };
+
+/** 1インスタンス分の配置情報 */
+type InstancePlacement = { matrix: Matrix4; tint: number };
 
 export class WorldRenderer {
   readonly scene = new Scene();
@@ -121,6 +135,8 @@ export class WorldRenderer {
     g.setAttribute('uv', new BufferAttribute(uvs, 2));
     g.setAttribute('color', new BufferAttribute(colors, 3));
     g.setAttribute(TEX_LAYER_ATTRIBUTE, new BufferAttribute(layers, 1));
+    // 地面は着色の対象外だが、シェーダーが参照する属性なので素の色として持たせる
+    g.setAttribute(TINT_ATTRIBUTE, new BufferAttribute(tintAttributeArray(4, TINT_NONE), 4));
     g.setIndex(new BufferAttribute(new Uint16Array([0, 1, 2, 0, 2, 3]), 1));
     g.computeBoundingSphere();
     const ground = new Mesh(g, this.opaqueMaterial);
@@ -190,15 +206,26 @@ export class WorldRenderer {
     }
   }
 
-  private addInstanceGroup(def: BlockDef, variant: InstanceGroup['variant'], geometry: TBufferGeometry): void {
+  private addInstanceGroup(def: BlockDef, variant: InstanceGroup['variant'], source: TBufferGeometry): void {
     const material = variant === 'glass' ? this.transparentMaterial : this.opaqueMaterial;
-    const mesh = new InstancedMesh(geometry, material, 16);
+    // ゴーストプレビューと同じジオメトリを共有したままインスタンス属性を足すと
+    // 非インスタンス描画へも影響しうるので、ここでは複製を持つ
+    const geometry = source.clone();
+    const capacity = 16;
+    const tintAttribute = new InstancedBufferAttribute(
+      tintAttributeArray(capacity, TINT_NONE),
+      4,
+    );
+    tintAttribute.setUsage(DynamicDrawUsage);
+    geometry.setAttribute(TINT_ATTRIBUTE, tintAttribute);
+
+    const mesh = new InstancedMesh(geometry, material, capacity);
     mesh.count = 0;
     mesh.frustumCulled = false;
     mesh.name = `${def.blockId}:${variant}`;
     if (variant === 'glass') mesh.renderOrder = 1;
     this.instanceGroup.add(mesh);
-    this.instanceGroups.push({ def, variant, geometry, material, mesh });
+    this.instanceGroups.push({ def, variant, geometry, material, mesh, tintAttribute });
   }
 
   /** ブロック種類ごとの描画用ジオメトリ（ゴーストにも使う） */
@@ -207,7 +234,7 @@ export class WorldRenderer {
   }
 
   private rebuildInstances(world: World): void {
-    const buckets = new Map<InstanceGroup, Matrix4[]>();
+    const buckets = new Map<InstanceGroup, InstancePlacement[]>();
     for (const g of this.instanceGroups) buckets.set(g, []);
 
     for (const cellIdx of world.specialCellIndices()) {
@@ -218,6 +245,7 @@ export class WorldRenderer {
       if (!def) continue;
       const rot = world.voxels.getRotation(c.x, c.y, c.z);
       const open = world.voxels.getState(c.x, c.y, c.z);
+      const tint = world.voxels.getTint(c.x, c.y, c.z);
 
       this.tmpPos.set(c.x + 0.5, c.y + 0.5, c.z + 0.5);
       this.tmpQuat.setFromAxisAngle(this.tmpAxis, rot * DEG90);
@@ -228,18 +256,25 @@ export class WorldRenderer {
         if (g.def !== def) continue;
         if (g.variant === 'solid' && wantOpen) continue;
         if (g.variant === 'solidOpen' && !wantOpen) continue;
-        buckets.get(g)!.push(matrix);
+        buckets.get(g)!.push({ matrix, tint });
       }
     }
 
     for (const g of this.instanceGroups) {
       const list = buckets.get(g)!;
       this.ensureCapacity(g, list.length);
+      const tints = g.tintAttribute.array as Float32Array;
       for (let i = 0; i < list.length; i++) {
-        g.mesh.setMatrixAt(i, list[i]);
+        g.mesh.setMatrixAt(i, list[i].matrix);
+        const paint = tintAttributeValue(list[i].tint);
+        tints[i * 4] = paint[0];
+        tints[i * 4 + 1] = paint[1];
+        tints[i * 4 + 2] = paint[2];
+        tints[i * 4 + 3] = paint[3];
       }
       g.mesh.count = list.length;
       g.mesh.instanceMatrix.needsUpdate = true;
+      g.tintAttribute.needsUpdate = true;
       g.mesh.visible = list.length > 0;
     }
   }
@@ -251,6 +286,13 @@ export class WorldRenderer {
     const old = group.mesh;
     this.instanceGroup.remove(old);
     old.dispose();
+
+    // 着色属性もインスタンス数に合わせて作り直す
+    const tintAttribute = new InstancedBufferAttribute(tintAttributeArray(cap, TINT_NONE), 4);
+    tintAttribute.setUsage(DynamicDrawUsage);
+    group.geometry.setAttribute(TINT_ATTRIBUTE, tintAttribute);
+    group.tintAttribute = tintAttribute;
+
     const mesh = new InstancedMesh(group.geometry, group.material, cap);
     mesh.count = 0;
     mesh.frustumCulled = false;
@@ -345,9 +387,29 @@ export class WorldRenderer {
       g.geometry.dispose();
     }
     this.instanceGroups.length = 0;
+    // 複製元（ゴーストと共有している形状）も解放する
+    for (const set of this.geometrySets.values()) {
+      set.solid.dispose();
+      set.solidOpen?.dispose();
+      set.glass?.dispose();
+    }
+    this.geometrySets.clear();
     this.opaqueMaterial.dispose();
     this.transparentMaterial.dispose();
   }
+}
+
+/** 着色属性（vec4 × count）の配列を作る */
+function tintAttributeArray(count: number, tint: number): Float32Array {
+  const paint = tintAttributeValue(tint);
+  const array = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) {
+    array[i * 4] = paint[0];
+    array[i * 4 + 1] = paint[1];
+    array[i * 4 + 2] = paint[2];
+    array[i * 4 + 3] = paint[3];
+  }
+  return array;
 }
 
 /** 内側から見る空用のボックス。ワールドを十分に覆う大きさ */

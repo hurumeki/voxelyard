@@ -9,10 +9,16 @@
 import { GRID_X, GRID_Y, GRID_Z, degreesToRotationIndex, rotationIndexToDegrees } from '../core/coords.ts';
 import type { CellPos } from '../core/coords.ts';
 import { blockDefById, blockDefByIndex, blockIndexOf } from '../core/blocks.ts';
+import { TINT_NONE, blockColorIdOf, blockColorIndexOf } from '../core/blockColors.ts';
 import { World } from '../game/world.ts';
 import type { WorldMeta } from './db.ts';
 
-export const FORMAT_VERSION = 1;
+/**
+ * 書き出しフォーマットの版。
+ * v2 でブロックの色（color）を追加した。色は省略可能なので v1 も読み込める。
+ */
+export const FORMAT_VERSION = 2;
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2];
 
 export type ExportedBlock = {
   x: number;
@@ -20,6 +26,8 @@ export type ExportedBlock = {
   z: number;
   blockId: string;
   rotationY: number;
+  /** 着色。素の色のブロックでは省略する */
+  color?: string;
   state?: { open: boolean };
   occupies?: Array<{ x: number; y: number; z: number }>;
 };
@@ -51,6 +59,8 @@ export function buildExport(world: World, meta: WorldMeta): ExportedWorld {
       blockId: def.blockId,
       rotationY: rotationIndexToDegrees(rot),
     };
+    const colorId = blockColorIdOf(world.voxels.getTint(x, y, z));
+    if (colorId) entry.color = colorId;
     if (def.usesState) {
       entry.state = { open: world.voxels.getState(x, y, z) };
     }
@@ -129,9 +139,10 @@ function isInt(v: unknown): v is number {
 export function importWorld(json: unknown): ImportResult {
   if (!isObject(json)) throw new ImportError('JSON の形式が不正です。');
 
-  if (json.formatVersion !== FORMAT_VERSION) {
+  if (typeof json.formatVersion !== 'number' || !SUPPORTED_FORMAT_VERSIONS.includes(json.formatVersion)) {
     throw new ImportError(
-      `対応していないフォーマットです（formatVersion: ${String(json.formatVersion)}／対応: ${FORMAT_VERSION}）。`,
+      `対応していないフォーマットです（formatVersion: ${String(json.formatVersion)}` +
+        `／対応: ${SUPPORTED_FORMAT_VERSIONS.join(', ')}）。`,
     );
   }
 
@@ -229,11 +240,24 @@ export function importWorld(json: unknown): ImportResult {
       continue;
     }
 
+    // 未知の色は素の色として読み込む（読み込み全体は失敗させない）
+    let tint = TINT_NONE;
+    if (raw.color !== undefined) {
+      if (typeof raw.color !== 'string') {
+        fail(`color が不正です: ${String(raw.color)}`);
+        continue;
+      }
+      tint = blockColorIndexOf(raw.color);
+      if (tint === TINT_NONE) {
+        if (messages.length < 5) messages.push(`未知の色です（素の色にしました）: ${raw.color}`);
+      }
+    }
+
     const blockIndex = blockIndexOf(def.blockId);
     const open = isObject(raw.state) && raw.state.open === true;
     expected.forEach((c: CellPos, i: number) => {
       claimed.add(key(c));
-      world.voxels.setBlock(c.x, c.y, c.z, blockIndex, rot, def.usesState && open, i > 0);
+      world.voxels.setBlock(c.x, c.y, c.z, blockIndex, rot, def.usesState && open, i > 0, tint);
     });
     placed++;
   }

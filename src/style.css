@@ -346,6 +346,45 @@ button {
   position: absolute;
 }
 
+/* カラーパレット（設置モード・色ぬりモードのときだけ表示） */
+
+#palette {
+  position: absolute;
+  /* ホットバーのすぐ上。右側はジャンプボタンの列を避ける */
+  bottom: calc(84px + var(--safe-b));
+  right: calc(112px + var(--safe-r));
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: rgba(38, 43, 32, 0.8);
+}
+
+.color-chip {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  padding: 0;
+}
+
+.color-chip.selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--accent-strong);
+}
+
+/* 「素の色」のスウォッチ。斜線で着色なしを表す */
+.color-chip-none {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(232, 234, 217, 0.9) 0%,
+      rgba(232, 234, 217, 0.9) 44%,
+      rgba(120, 90, 60, 0.9) 46%,
+      rgba(120, 90, 60, 0.9) 100%
+    );
+}
+
 /* 仮想スティック */
 
 /* 設置モードの狙点。指を離しているあいだはここを狙う */

@@ -24,12 +24,13 @@ import {
   getSetting,
   getWorld,
   listWorlds,
-  loadVoxelBuffer,
+  loadWorldBuffers,
   newWorldId,
   putWorldMeta,
   saveWorld,
   setSetting,
 } from './storage/db.ts';
+import { TINT_NONE, blockColorIdOf, blockColorIndexOf } from './core/blockColors.ts';
 import type { WorldMeta } from './storage/db.ts';
 import { buildExport, downloadJson, exportFilename, ImportError, importWorld } from './storage/worldIO.ts';
 import { registerServiceWorker } from './pwa.ts';
@@ -39,6 +40,8 @@ type Settings = {
   audioEnabled: boolean;
   showFps: boolean;
   pixelRatio: number;
+  /** 選択中のブロックの色 id（null = 素の色） */
+  blockColorId: string | null;
 };
 
 const app = requireEl('#app');
@@ -138,6 +141,13 @@ async function main(): Promise<void> {
     onRotate: (d) => state.game?.rotatePlacement(d),
     onSelectSlot: (i) => state.game?.selectSlot(i),
     onSelectTool: (t) => state.game?.selectTool(t),
+    onSelectColor: (tint) => {
+      // ゲーム画面を開く前でもパレットの選択は反映する
+      hud.setSelectedColor(tint);
+      state.game?.setPlaceTint(tint);
+      state.settings.blockColorId = blockColorIdOf(tint);
+      void setSetting('blockColorId', state.settings.blockColorId);
+    },
     onOpenSettings: () => openSettings(),
     onOpenInventory: () => openInventory(),
     onSave: () => {
@@ -146,6 +156,7 @@ async function main(): Promise<void> {
     onExitToWorldList: () => void exitToWorldList(),
   });
   hud.setHotbar(settings.hotbarConfig);
+  hud.setSelectedColor(settings.blockColorId ? blockColorIndexOf(settings.blockColorId) : TINT_NONE);
   gameScreen.appendChild(hud.root);
 
   // 最初のタップで AudioContext をアンロックする（iOS 対策）
@@ -259,7 +270,7 @@ async function main(): Promise<void> {
       updatedAt: now,
       playerState: { positionWorld: spawn, rotationY: 0 },
     };
-    await saveWorld(meta, world.voxels.cloneBuffer());
+    await saveWorld(meta, world.voxels.cloneBuffer(), world.voxels.cloneTintBuffer());
     return meta;
   }
 
@@ -289,8 +300,8 @@ async function main(): Promise<void> {
         return;
       }
 
-      const buffer = await loadVoxelBuffer(worldId);
-      const world = new World(buffer ?? undefined);
+      const buffers = await loadWorldBuffers(worldId);
+      const world = new World(buffers?.voxelData, buffers?.tintData);
 
       if (!state.game) {
         state.game = await Game.create(
@@ -301,6 +312,7 @@ async function main(): Promise<void> {
             audio,
             pixelRatio: state.settings.pixelRatio,
             showFps: state.settings.showFps,
+            initialTint: hud.getSelectedColor(),
             forceWebGL,
           },
           world,
@@ -344,8 +356,8 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------ 入出力
 
   async function exportWorld(meta: WorldMeta): Promise<void> {
-    const buffer = await loadVoxelBuffer(meta.worldId);
-    const world = new World(buffer ?? undefined);
+    const buffers = await loadWorldBuffers(meta.worldId);
+    const world = new World(buffers?.voxelData, buffers?.tintData);
     downloadJson(buildExport(world, meta), exportFilename(meta.name));
   }
 
@@ -581,13 +593,14 @@ function settingSwitch(
 }
 
 async function loadSettings(): Promise<Settings> {
-  const [hotbarConfig, audioEnabled, showFps, pixelRatio] = await Promise.all([
+  const [hotbarConfig, audioEnabled, showFps, pixelRatio, blockColorId] = await Promise.all([
     getSetting<string[]>('hotbarConfig', [...DEFAULT_HOTBAR]),
     getSetting<boolean>('audioEnabled', true),
     getSetting<boolean>('showFps', false),
     getSetting<number>('pixelRatio', 1.0),
+    getSetting<string | null>('blockColorId', null),
   ]);
-  return { hotbarConfig, audioEnabled, showFps, pixelRatio };
+  return { hotbarConfig, audioEnabled, showFps, pixelRatio, blockColorId };
 }
 
 registerServiceWorker();

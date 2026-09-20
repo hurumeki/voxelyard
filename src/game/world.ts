@@ -26,6 +26,7 @@ import {
 } from '../core/blocks.ts';
 import type { BlockDef } from '../core/blocks.ts';
 import { VoxelData } from '../core/voxelData.ts';
+import { TINT_NONE, normalizeTint } from '../core/blockColors.ts';
 
 /** ワールド座標の軸平行境界ボックス（メートル） */
 export type AABB = {
@@ -81,8 +82,8 @@ export class World {
   /** 前回保存以降に変更があったか */
   private dirty = false;
 
-  constructor(buffer?: ArrayBufferLike) {
-    this.voxels = new VoxelData(buffer);
+  constructor(buffer?: ArrayBufferLike, tintBuffer?: ArrayBufferLike) {
+    this.voxels = new VoxelData(buffer, tintBuffer);
     this.voxels.setChangeListener((x, y, z) => this.onCellChanged(x, y, z));
     this.rebuildSpecialIndex();
     this.markAllChunksDirty();
@@ -261,16 +262,47 @@ export class World {
     return { ok: true };
   }
 
-  /** 設置する。canPlace が通っている前提 */
-  place(blockId: string, base: CellPos, rotation: number): boolean {
+  /**
+   * 設置する。canPlace が通っている前提。
+   * tint は色番号（0 = 素の色）。マルチセル占有ブロックは全セルへ同じ色を入れる。
+   */
+  place(blockId: string, base: CellPos, rotation: number, tint: number = TINT_NONE): boolean {
     const blockIndex = blockIndexOf(blockId);
     const def = blockDefByIndex(blockIndex);
     if (!def) return false;
+    const color = normalizeTint(tint);
     const cells = this.occupiedCells(def, base, rotation);
     cells.forEach((c, i) => {
-      this.voxels.setBlock(c.x, c.y, c.z, blockIndex, rotation, false, i > 0);
+      this.voxels.setBlock(c.x, c.y, c.z, blockIndex, rotation, false, i > 0, color);
     });
     return true;
+  }
+
+  /**
+   * 設置済みブロックの色を変える。
+   * どのセルをタップしてもブロック全体（マルチセル占有なら全セル）に適用する。
+   * 空セル・既に同じ色だった場合は false（無駄な保存・再構築を避ける）。
+   */
+  paint(cell: CellPos, tint: number): boolean {
+    const baseCell = this.findBaseCell(cell);
+    if (!baseCell) return false;
+    const def = blockDefByIndex(this.voxels.getBlockId(baseCell.x, baseCell.y, baseCell.z));
+    if (!def) return false;
+    const color = normalizeTint(tint);
+    const rot = this.voxels.getRotation(baseCell.x, baseCell.y, baseCell.z);
+    const cells = this.occupiedCells(def, baseCell, rot);
+    if (cells.every((c) => this.voxels.getTint(c.x, c.y, c.z) === color)) return false;
+    for (const c of cells) {
+      this.voxels.setTint(c.x, c.y, c.z, color);
+    }
+    return true;
+  }
+
+  /** セルの色番号（0 = 素の色） */
+  tintAt(cell: CellPos): number {
+    const baseCell = this.findBaseCell(cell);
+    if (!baseCell) return TINT_NONE;
+    return this.voxels.getTint(baseCell.x, baseCell.y, baseCell.z);
   }
 
   /**

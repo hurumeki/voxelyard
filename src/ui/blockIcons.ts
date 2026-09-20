@@ -5,12 +5,14 @@
 
 import type { TextureName } from '../core/blocks.ts';
 import { BLOCK_DEFS } from '../core/blocks.ts';
+import { TINT_NONE, applyTintSrgb255 } from '../core/blockColors.ts';
 import type { TextureSource } from '../render/textures.ts';
 
-const cache = new Map<TextureName, string>();
+const cache = new Map<string, string>();
 
-function dataUrlFor(source: TextureSource, name: TextureName): string {
-  const cached = cache.get(name);
+function dataUrlFor(source: TextureSource, name: TextureName, tint: number): string {
+  const key = `${name}:${tint}`;
+  const cached = cache.get(key);
   if (cached) return cached;
 
   const size = source.size;
@@ -26,17 +28,31 @@ function dataUrlFor(source: TextureSource, name: TextureName): string {
     const src = (size - 1 - y) * size * 4;
     image.data.set(rgba.subarray(src, src + size * 4), y * size * 4);
   }
+  // 着色はゲーム内（シェーダー）と同じ式で適用する
+  if (tint !== TINT_NONE) {
+    const data = image.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const [r, g, b] = applyTintSrgb255(data[i], data[i + 1], data[i + 2], tint);
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+    }
+  }
   ctx.putImageData(image, 0, 0);
   const url = canvas.toDataURL('image/png');
-  cache.set(name, url);
+  cache.set(key, url);
   return url;
 }
 
-/** ブロックの代表面（側面）のアイコン URL */
-export function blockIconUrl(source: TextureSource, blockId: string): string {
+/** ブロックの代表面（側面）のアイコン URL。tint は色番号（0 = 素の色） */
+export function blockIconUrl(
+  source: TextureSource,
+  blockId: string,
+  tint: number = TINT_NONE,
+): string {
   const def = BLOCK_DEFS.find((d) => d.blockId === blockId);
   if (!def) return '';
   // 草ブロックは上面のほうが見分けやすい
   const name = def.blockId === 'grass_natural' ? def.tex.top : def.tex.side;
-  return dataUrlFor(source, name);
+  return dataUrlFor(source, name, tint);
 }

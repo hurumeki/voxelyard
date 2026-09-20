@@ -12,9 +12,14 @@
  *   bits 14-15 (2bit)  : 予備
  *
  * ビット演算がコード全体に散らばらないよう、アクセスは必ずこのモジュールのヘルパーを通すこと。
+ *
+ * 色（着色パレット番号）は 16bit に空きがないため、同じ並び順の密な Uint8Array
+ * （131,072 セル × 1バイト = 128KB）へ並行して持つ。0 は「素の色」。
+ * 2つの配列は常に同じセル索引で対応し、ブロックを消すと色も一緒に消える。
  */
 
 import { CELL_COUNT, GRID_X, GRID_Y, GRID_Z, cellIndex, inBounds } from './coords.ts';
+import { TINT_NONE, normalizeTint } from './blockColors.ts';
 
 export const MASK_BLOCK_ID = 0x03ff; // bits 0-9
 export const SHIFT_ROTATION = 10;
@@ -59,11 +64,13 @@ export function packCell(
  */
 export class VoxelData {
   readonly cells: Uint16Array;
+  /** セルごとの色番号（0 = 着色なし）。cells と同じ索引で対応する */
+  readonly tints: Uint8Array;
 
   /** 変更されたセルを通知するコールバック（チャンク再構築のトリガ） */
   private onCellChanged: ((x: number, y: number, z: number) => void) | null = null;
 
-  constructor(buffer?: ArrayBufferLike) {
+  constructor(buffer?: ArrayBufferLike, tintBuffer?: ArrayBufferLike) {
     if (buffer) {
       if (buffer.byteLength !== CELL_COUNT * 2) {
         throw new Error(
@@ -73,6 +80,13 @@ export class VoxelData {
       this.cells = new Uint16Array(buffer);
     } else {
       this.cells = new Uint16Array(CELL_COUNT);
+    }
+
+    // 色データは後から追加された層なので、無い保存データ（旧バージョン）も受け入れる
+    if (tintBuffer && tintBuffer.byteLength === CELL_COUNT) {
+      this.tints = new Uint8Array(tintBuffer);
+    } else {
+      this.tints = new Uint8Array(CELL_COUNT);
     }
   }
 
@@ -88,6 +102,12 @@ export class VoxelData {
 
   getBlockId(x: number, y: number, z: number): number {
     return getBlockIdFromRaw(this.getRaw(x, y, z));
+  }
+
+  /** セルの色番号（0 = 着色なし）。範囲外は 0 */
+  getTint(x: number, y: number, z: number): number {
+    if (!inBounds(x, y, z)) return TINT_NONE;
+    return this.tints[cellIndex(x, y, z)];
   }
 
   getRotation(x: number, y: number, z: number): number {
@@ -123,11 +143,30 @@ export class VoxelData {
     rotation = 0,
     state = false,
     dependent = false,
+    tint = TINT_NONE,
   ): void {
+    this.setTint(x, y, z, tint);
     this.setRaw(x, y, z, packCell(blockIndex, rotation, state, dependent));
   }
 
+  /**
+   * セルの色を変える。空セルの色は意味を持たないので無視する。
+   * 変化があればセル変更として通知する（メッシュの作り直しが必要なため）。
+   */
+  setTint(x: number, y: number, z: number, tint: number): void {
+    if (!inBounds(x, y, z)) return;
+    const value = normalizeTint(tint);
+    const i = cellIndex(x, y, z);
+    if (this.tints[i] === value) return;
+    this.tints[i] = value;
+    // 空セルは描画対象がないので通知不要（setBlock からの呼び出しは直後に setRaw が通知する）
+    if (this.cells[i] !== 0) this.onCellChanged?.(x, y, z);
+  }
+
   clearCell(x: number, y: number, z: number): void {
+    if (!inBounds(x, y, z)) return;
+    // 色はブロックに付随する情報なので、消したら必ず素の色へ戻す
+    this.tints[cellIndex(x, y, z)] = TINT_NONE;
     this.setRaw(x, y, z, 0);
   }
 
@@ -140,6 +179,7 @@ export class VoxelData {
   /** すべてのセルを空にする */
   clearAll(): void {
     this.cells.fill(0);
+    this.tints.fill(TINT_NONE);
   }
 
   /** 設置済みセルを走査する（空セルはスキップ） */
@@ -160,5 +200,10 @@ export class VoxelData {
   /** 保存用に ArrayBuffer のコピーを返す */
   cloneBuffer(): ArrayBuffer {
     return this.cells.slice().buffer as ArrayBuffer;
+  }
+
+  /** 保存用に色データ（1セル1バイト）のコピーを返す */
+  cloneTintBuffer(): ArrayBuffer {
+    return this.tints.slice().buffer as ArrayBuffer;
   }
 }

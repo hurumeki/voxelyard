@@ -21,7 +21,8 @@ import { GhostPreview } from '../render/ghost.ts';
 import { PlayerModel } from '../render/playerModel.ts';
 import { TouchControls } from '../input/touchControls.ts';
 import { Hud } from '../ui/hud.ts';
-import type { Mode } from '../ui/hud.ts';
+import type { Mode, Tool } from '../ui/hud.ts';
+import { TINT_NONE, normalizeTint } from '../core/blockColors.ts';
 import { AudioManager } from '../audio/audio.ts';
 import { toast } from '../ui/dom.ts';
 import type { WorldMeta } from '../storage/db.ts';
@@ -45,6 +46,8 @@ export type GameOptions = {
   audio: AudioManager;
   pixelRatio: number;
   showFps: boolean;
+  /** 起動時に選択しておく色番号（0 = 素の色） */
+  initialTint?: number;
   /** WebGL2 バックエンドを強制する（開発時の動作確認用） */
   forceWebGL?: boolean;
 };
@@ -67,6 +70,8 @@ export class Game {
   private mode: Mode = 'normal';
   private selectedIndex = -1;
   private placeRotation = 0;
+  /** 設置・色ぬりに使う色番号（0 = 素の色） */
+  private placeTint = TINT_NONE;
   /** 着座中の椅子のセル */
   private seatCell: CellPos | null = null;
 
@@ -131,6 +136,7 @@ export class Game {
 
     this.hud.setMode('normal');
     this.hud.setFpsVisible(this.showFps);
+    this.setPlaceTint(options.initialTint ?? TINT_NONE);
 
     this.applyWorld(world, meta);
   }
@@ -321,8 +327,18 @@ export class Game {
     this.setMode('place');
   }
 
-  selectTool(tool: 'break' | 'action'): void {
+  selectTool(tool: Tool): void {
     this.setMode(this.mode === tool ? 'normal' : tool);
+  }
+
+  /** これから置くブロックの色・色ぬりで塗る色を変える */
+  setPlaceTint(tint: number): void {
+    this.placeTint = normalizeTint(tint);
+    this.hud.setSelectedColor(this.placeTint);
+  }
+
+  getPlaceTint(): number {
+    return this.placeTint;
   }
 
   rotatePlacement(delta: number): void {
@@ -401,9 +417,20 @@ export class Game {
         this.notifyPlaceFailure(reason);
         return;
       }
-      this.world.place(blockId, target, this.placeRotation);
+      this.world.place(blockId, target, this.placeRotation, this.placeTint);
       this.audio.playEffect('place');
       this.scheduleSave();
+      return;
+    }
+
+    if (this.mode === 'paint') {
+      if (hit.isGround) return; // 地面は塗れない
+      if (!this.withinReach(hit.cell)) return;
+      // 既に同じ色なら false が返るので、保存も効果音も走らない
+      if (this.world.paint(hit.cell, this.placeTint)) {
+        this.audio.playEffect('place');
+        this.scheduleSave();
+      }
       return;
     }
 
@@ -573,7 +600,7 @@ export class Game {
     this.meta = meta;
 
     try {
-      await saveWorld(meta, this.world.voxels.cloneBuffer());
+      await saveWorld(meta, this.world.voxels.cloneBuffer(), this.world.voxels.cloneTintBuffer());
     } catch (err: unknown) {
       this.world.markDirty();
       console.error('ワールドの保存に失敗しました', err);

@@ -6,16 +6,24 @@
  * │           （3Dビューポート）                  │
  * │                              [⟲][⟳] ← 回転  │
  * │                                  [ジャンプ]  │
+ * │                    [カラーパレット]          │
  * │ ○ 仮想スティック          [ホットバー 1〜8]  │
  * └─────────────────────────────────────────────┘
+ *
+ * カラーパレットは設置モード・色ぬりモードのときだけ表示する。
+ * 選んだ色は「これから置くブロックの色」であり、同時に「色ぬりで塗る色」でもある。
  */
 
 import { BLOCK_DEFS, blockDefById } from '../core/blocks.ts';
+import { BLOCK_COLORS, TINT_NONE } from '../core/blockColors.ts';
 import type { TextureSource } from '../render/textures.ts';
 import { blockIconUrl } from './blockIcons.ts';
 import { asUiControl, el } from './dom.ts';
 
-export type Mode = 'normal' | 'place' | 'break' | 'action';
+export type Mode = 'normal' | 'place' | 'break' | 'action' | 'paint';
+
+/** ホットバー右側の道具スロット */
+export type Tool = 'break' | 'action' | 'paint';
 
 export const HOTBAR_SIZE = 8;
 
@@ -36,13 +44,16 @@ const MODE_LABEL: Record<Mode, string> = {
   place: '設置モード',
   break: '破壊モード',
   action: 'アクションモード',
+  paint: '色ぬりモード',
 };
 
 export type HudCallbacks = {
   onJump(): void;
   onRotate(delta: number): void;
   onSelectSlot(index: number): void;
-  onSelectTool(tool: 'break' | 'action'): void;
+  onSelectTool(tool: Tool): void;
+  /** 色番号（0 = 素の色） */
+  onSelectColor(tint: number): void;
   onOpenSettings(): void;
   onOpenInventory(): void;
   onSave(): void;
@@ -60,10 +71,15 @@ export class Hud {
   private readonly slots: HTMLElement[] = [];
   private readonly breakSlot: HTMLElement;
   private readonly actionSlot: HTMLElement;
+  private readonly paintSlot: HTMLElement;
+  private readonly paletteRow: HTMLElement;
+  private readonly colorChips: HTMLElement[] = [];
 
   private hotbar: string[] = [...DEFAULT_HOTBAR];
   private mode: Mode = 'normal';
   private selectedIndex = -1;
+  /** 選択中の色番号（0 = 素の色） */
+  private selectedTint = TINT_NONE;
 
   constructor(
     private readonly textureSource: TextureSource,
@@ -127,8 +143,15 @@ export class Hud {
     this.actionSlot.appendChild(el('div', { className: 'slot-swatch', text: '✋' }));
     this.actionSlot.appendChild(el('div', { text: '操作' }));
     this.actionSlot.addEventListener('click', () => this.callbacks.onSelectTool('action'));
+    this.paintSlot = asUiControl(el('button', { className: 'slot' }));
+    this.paintSlot.appendChild(el('div', { className: 'slot-swatch', text: '🎨' }));
+    this.paintSlot.appendChild(el('div', { text: '色ぬり' }));
+    this.paintSlot.addEventListener('click', () => this.callbacks.onSelectTool('paint'));
     hotbarRow.appendChild(this.breakSlot);
     hotbarRow.appendChild(this.actionSlot);
+    hotbarRow.appendChild(this.paintSlot);
+
+    this.paletteRow = this.buildPalette();
 
     this.stickRoot = el('div', {
       attrs: { id: 'stick' },
@@ -140,10 +163,59 @@ export class Hud {
 
     this.root = el('div', {
       attrs: { id: 'hud' },
-      children: [topLeft, topRight, bottomRight, hotbarRow, this.stickRoot, this.crosshair],
+      children: [
+        topLeft,
+        topRight,
+        bottomRight,
+        this.paletteRow,
+        hotbarRow,
+        this.stickRoot,
+        this.crosshair,
+      ],
     });
 
     this.renderHotbar();
+    this.updatePalette();
+  }
+
+  // ---------------------------------------------------------------- カラーパレット
+
+  /** 「素の色」＋パレット色のスウォッチを並べる */
+  private buildPalette(): HTMLElement {
+    const row = el('div', { attrs: { id: 'palette' }, className: 'hidden' });
+
+    const addChip = (tint: number, label: string, css: string | null): void => {
+      const chip = asUiControl(el('button', { className: 'color-chip', attrs: { title: label } }));
+      if (css) chip.style.background = css;
+      else chip.classList.add('color-chip-none');
+      chip.addEventListener('click', () => this.callbacks.onSelectColor(tint));
+      this.colorChips.push(chip);
+      row.appendChild(chip);
+    };
+
+    // 先頭は着色なし（素材そのままの色）
+    addChip(TINT_NONE, '素の色', null);
+    BLOCK_COLORS.forEach((c, i) => addChip(i + 1, c.name, c.css));
+    return row;
+  }
+
+  setSelectedColor(tint: number): void {
+    if (tint === this.selectedTint) return;
+    this.selectedTint = tint;
+    this.updatePalette();
+    // ホットバーのアイコンも選択中の色で表示する（置く前に色が分かるように）
+    this.renderHotbar();
+  }
+
+  getSelectedColor(): number {
+    return this.selectedTint;
+  }
+
+  private updatePalette(): void {
+    this.colorChips.forEach((chip, i) => {
+      chip.classList.toggle('selected', i === this.selectedTint);
+    });
+    this.paletteRow.classList.toggle('hidden', this.mode !== 'place' && this.mode !== 'paint');
   }
 
   // ---------------------------------------------------------------- 状態反映
@@ -153,6 +225,7 @@ export class Hud {
     this.modeBadge.textContent = MODE_LABEL[mode];
     this.rotateRow.classList.toggle('hidden', mode !== 'place');
     this.crosshair.classList.toggle('hidden', mode !== 'place');
+    this.updatePalette();
     this.updateSelection();
   }
 
@@ -167,6 +240,7 @@ export class Hud {
     });
     this.breakSlot.classList.toggle('selected', this.mode === 'break');
     this.actionSlot.classList.toggle('selected', this.mode === 'action');
+    this.paintSlot.classList.toggle('selected', this.mode === 'paint');
   }
 
   setHotbar(config: string[]): void {
@@ -197,7 +271,10 @@ export class Hud {
       }
       const img = el('img', {
         className: 'slot-swatch',
-        attrs: { src: blockIconUrl(this.textureSource, def.blockId), alt: def.name },
+        attrs: {
+          src: blockIconUrl(this.textureSource, def.blockId, this.selectedTint),
+          alt: def.name,
+        },
       });
       slot.appendChild(img);
       slot.appendChild(el('div', { text: def.name }));
