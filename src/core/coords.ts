@@ -100,6 +100,31 @@ export const NEIGHBOR_DIRS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, -1],
 ];
 
+/**
+ * 水平方向 (dx, dz) を向くための yaw。
+ * 0 のとき -Z（奥）を向く。プレイヤー・特殊ブロックの正面の取り方と揃えてある
+ * （rotationForward の 0 と同じ向き）。
+ */
+export function yawTowards(dx: number, dz: number): number {
+  return Math.atan2(-dx, -dz);
+}
+
+/** 角度を -π 〜 π に正規化する */
+export function normalizeAngle(angle: number): number {
+  const TAU = Math.PI * 2;
+  let r = (angle + Math.PI) % TAU;
+  if (r < 0) r += TAU;
+  return r - Math.PI;
+}
+
+/**
+ * current から target へ最短回りで t（0〜1）だけ近づけた角度。
+ * 差を正規化してから補間するので、+179° → -179° で長い方へ回らない。
+ */
+export function approachAngle(current: number, target: number, t: number): number {
+  return current + normalizeAngle(target - current) * t;
+}
+
 /** rotationY のインデックス(0-3) → 度 */
 export function rotationIndexToDegrees(idx: number): 0 | 90 | 180 | 270 {
   return ([0, 90, 180, 270] as const)[idx & 3];

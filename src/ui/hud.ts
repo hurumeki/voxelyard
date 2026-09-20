@@ -56,6 +56,7 @@ export class Hud {
   private readonly modeBadge: HTMLElement;
   private readonly fpsMeter: HTMLElement;
   private readonly rotateRow: HTMLElement;
+  private readonly crosshair: HTMLElement;
   private readonly slots: HTMLElement[] = [];
   private readonly breakSlot: HTMLElement;
   private readonly actionSlot: HTMLElement;
@@ -134,9 +135,12 @@ export class Hud {
       children: [el('div', { className: 'stick-knob' })],
     });
 
+    // 指を離しているあいだは画面中央を狙っていることを示す（設置モード時のみ表示）
+    this.crosshair = el('div', { attrs: { id: 'crosshair' }, className: 'hidden' });
+
     this.root = el('div', {
       attrs: { id: 'hud' },
-      children: [topLeft, topRight, bottomRight, hotbarRow, this.stickRoot],
+      children: [topLeft, topRight, bottomRight, hotbarRow, this.stickRoot, this.crosshair],
     });
 
     this.renderHotbar();
@@ -148,6 +152,7 @@ export class Hud {
     this.mode = mode;
     this.modeBadge.textContent = MODE_LABEL[mode];
     this.rotateRow.classList.toggle('hidden', mode !== 'place');
+    this.crosshair.classList.toggle('hidden', mode !== 'place');
     this.updateSelection();
   }
 

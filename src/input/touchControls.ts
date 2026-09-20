@@ -23,6 +23,8 @@ export type TouchCallbacks = {
   onZoom(factor: number): void;
   onTap(clientX: number, clientY: number): void;
   onAim(clientX: number, clientY: number): void;
+  /** 右半分から指が全て離れた。狙点を画面中央（＝視線方向）へ戻す */
+  onAimEnd(): void;
 };
 
 type LeftPointer = {
@@ -181,6 +183,8 @@ export class TouchControls {
       this.pinchStartDistance = 0;
       this.pinchLastDistance = 0;
     }
+    // 指が残っていない間は「最後に触れた位置」ではなく視線方向を狙う
+    if (this.right.size === 0) this.callbacks.onAimEnd();
   };
 
   private pinchDistance(): number {
