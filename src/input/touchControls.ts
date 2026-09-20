@@ -1,15 +1,19 @@
 /**
  * タッチ操作（仕様書 セクション5）
  *
- * | エリア        | ジェスチャー          | 動作                         |
- * |---------------|-----------------------|------------------------------|
- * | 画面左半分    | タップ開始位置にスティック生成＋ドラッグ | 移動（アナログ360°） |
- * | 画面右半分    | スワイプ              | カメラ視点回転               |
- * | 画面右半分    | ピンチ                | ズームイン／アウト           |
- * | 画面右半分    | タップ（移動10px未満）| ブロック操作                 |
+ * | エリア          | ジェスチャー          | 動作                         |
+ * |-----------------|-----------------------|------------------------------|
+ * | 画面左下 33%    | タップ開始位置にスティック生成＋ドラッグ | 移動（アナログ360°） |
+ * | それ以外        | スワイプ              | カメラ視点回転               |
+ * | それ以外        | ピンチ                | ズームイン／アウト           |
+ * | それ以外        | タップ（移動10px未満）| ブロック操作                 |
  *
- * ジャンプは専用ボタンに分離してあるので、右半分のタップは常にブロック操作。
+ * 移動エリアを左半分にすると画面中央付近のタップまで移動として奪われてしまうため、
+ * 親指の届く左下の隅（縦横それぞれ 33%）だけに限定している。
+ * ジャンプは専用ボタンに分離してあるので、移動エリア外のタップは常にブロック操作。
  */
+
+import { isInMoveZone } from './moveZone.ts';
 
 /** タップと判定する移動量の上限（px） */
 const TAP_MOVE_THRESHOLD = 10;
@@ -23,6 +27,8 @@ export type TouchCallbacks = {
   onZoom(factor: number): void;
   onTap(clientX: number, clientY: number): void;
   onAim(clientX: number, clientY: number): void;
+  /** 移動エリア外から指が全て離れた。狙点を画面中央（＝視線方向）へ戻す */
+  onAimEnd(): void;
 };
 
 type LeftPointer = {
@@ -90,9 +96,8 @@ export class TouchControls {
     this.hideStick();
   }
 
-  private isLeftHalf(clientX: number): boolean {
-    const rect = this.surface.getBoundingClientRect();
-    return clientX - rect.left < rect.width / 2;
+  private isInMoveZone(clientX: number, clientY: number): boolean {
+    return isInMoveZone(clientX, clientY, this.surface.getBoundingClientRect());
   }
 
   private onPointerDown = (ev: PointerEvent): void => {
@@ -101,7 +106,7 @@ export class TouchControls {
     ev.preventDefault();
     this.surface.setPointerCapture?.(ev.pointerId);
 
-    if (this.isLeftHalf(ev.clientX) && !this.left) {
+    if (this.isInMoveZone(ev.clientX, ev.clientY) && !this.left) {
       this.left = { id: ev.pointerId, originX: ev.clientX, originY: ev.clientY };
       this.showStick(ev.clientX, ev.clientY);
       this.updateStick(ev.clientX, ev.clientY);
@@ -181,6 +186,8 @@ export class TouchControls {
       this.pinchStartDistance = 0;
       this.pinchLastDistance = 0;
     }
+    // 指が残っていない間は「最後に触れた位置」ではなく視線方向を狙う
+    if (this.right.size === 0) this.callbacks.onAimEnd();
   };
 
   private pinchDistance(): number {

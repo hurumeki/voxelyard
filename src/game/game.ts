@@ -8,9 +8,11 @@
 import { Vector3, WebGPURenderer } from 'three/webgpu';
 import type { DataArrayTexture } from 'three/webgpu';
 
-import { GRID_X, GRID_Z } from '../core/coords.ts';
+import { GRID_X, GRID_Z, approachAngle, yawTowards } from '../core/coords.ts';
 import type { CellPos } from '../core/coords.ts';
 import { World } from './world.ts';
+import type { PlaceFailure } from './world.ts';
+import { placeFailMessage } from './placeFeedback.ts';
 import { raycastWorld } from './raycast.ts';
 import { CameraController } from './cameraController.ts';
 import { Player } from '../physics/player.ts';
@@ -31,6 +33,10 @@ export const REACH = 5.0;
 const AUTOSAVE_INTERVAL_MS = 30_000;
 /** 連続操作で保存が乱発しないようにするデバウンス */
 const SAVE_DEBOUNCE_MS = 1200;
+/** 同じ理由の「置けません」を繰り返し出さない間隔 */
+const PLACE_FAIL_REPEAT_MS = 1500;
+/** 設置候補の方向へ向き直る速さ（大きいほど速い） */
+const TURN_RATE = 12;
 
 export type GameOptions = {
   container: HTMLElement;
@@ -67,6 +73,8 @@ export class Game {
   private jumpQueued = false;
   private aimX: number | null = null;
   private aimY: number | null = null;
+  private lastFailReason: PlaceFailure | null = null;
+  private lastFailAt = 0;
 
   private running = false;
   private rafId = 0;
@@ -118,6 +126,7 @@ export class Game {
         this.aimX = x;
         this.aimY = y;
       },
+      onAimEnd: () => this.clearAim(),
     });
 
     this.hud.setMode('normal');
@@ -224,6 +233,9 @@ export class Game {
     if (steps > 0) this.jumpQueued = false;
 
     this.camera.update(this.world, this.player, dt);
+    // ゴーストは狙点からカメラ越しにレイを飛ばすのでカメラ更新の後、
+    // プレイヤーの向きをゴーストの方へ寄せるのでモデル更新の前に行う。
+    this.updateGhost(dt);
     this.playerModel.update(
       this.player.x,
       this.player.y,
@@ -235,7 +247,6 @@ export class Game {
     );
 
     this.worldRenderer.update(this.world);
-    this.updateGhost();
 
     // init() 済みなので同期版の render() でよい
     this.renderer.render(this.worldRenderer.scene, this.camera.camera);
@@ -279,7 +290,15 @@ export class Game {
   setMode(mode: Mode): void {
     this.mode = mode;
     this.hud.setMode(mode);
+    // モードを切り替えた直後に、前のモードで触れた位置を狙い続けないようにする
+    this.clearAim();
     if (mode !== 'place') this.ghost.hide();
+  }
+
+  /** 狙点を画面中央（カメラが向いている方向）へ戻す */
+  private clearAim(): void {
+    this.aimX = null;
+    this.aimY = null;
   }
 
   getMode(): Mode {
@@ -357,9 +376,10 @@ export class Game {
   }
 
   private async handleTap(clientX: number, clientY: number): Promise<void> {
+    // 狙点は pointerdown の onAim で既に設定済みで、指を離した時点で onAimEnd が
+    // 画面中央へ戻している。ここで上書きすると（await を挟むぶん onAimEnd より後に
+    // 動くため）タップ位置が狙点として残り続けてしまう。
     await this.audio.unlock();
-    this.aimX = clientX;
-    this.aimY = clientY;
 
     if (this.mode === 'normal') return;
     // 着座中はブロック操作を行えない
@@ -376,9 +396,11 @@ export class Game {
         y: hit.cell.y + hit.normal[1],
         z: hit.cell.z + hit.normal[2],
       };
-      if (!this.withinReach(target)) return;
-      const check = this.world.canPlace(blockId, target, this.placeRotation, this.player.box());
-      if (!check.ok) return;
+      const reason = this.placeFailure(blockId, target);
+      if (reason) {
+        this.notifyPlaceFailure(reason);
+        return;
+      }
       this.world.place(blockId, target, this.placeRotation);
       this.audio.playEffect('place');
       this.scheduleSave();
@@ -431,7 +453,7 @@ export class Game {
 
   // ---------------------------------------------------------------- ゴースト
 
-  private updateGhost(): void {
+  private updateGhost(dt: number): void {
     if (this.mode !== 'place') {
       this.ghost.hide();
       return;
@@ -457,9 +479,51 @@ export class Game {
       y: hit.cell.y + hit.normal[1],
       z: hit.cell.z + hit.normal[2],
     };
+    const reason = this.placeFailure(blockId, target);
+    this.ghost.show(blockId, target.x, target.y, target.z, this.placeRotation, reason);
+    this.faceCell(target, dt);
+  }
+
+  /**
+   * 設置に失敗したことを伝える。
+   * 置けない場所を連打しても同じ文言が並ばないよう、直前と同じ理由は少しの間抑える。
+   */
+  private notifyPlaceFailure(reason: PlaceFailure): void {
+    const now = performance.now();
+    if (reason === this.lastFailReason && now - this.lastFailAt < PLACE_FAIL_REPEAT_MS) return;
+    this.lastFailReason = reason;
+    this.lastFailAt = now;
+    toast(placeFailMessage(reason));
+  }
+
+  /**
+   * 設置できない理由。置けるなら null。
+   * リーチ判定は canPlace の外側なのでここで合わせて見る。
+   */
+  private placeFailure(blockId: string, target: CellPos): PlaceFailure | null {
     const check = this.world.canPlace(blockId, target, this.placeRotation, this.player.box());
-    const valid = check.ok && this.withinReach(target);
-    this.ghost.show(blockId, target.x, target.y, target.z, this.placeRotation, valid);
+    if (!check.ok) return check.reason;
+    if (!this.withinReach(target)) return 'out-of-reach';
+    return null;
+  }
+
+  /**
+   * プレイヤーを候補セルの方向へ向ける。
+   * ゴーストの位置と体の向きが食い違うと「どこへ置こうとしているか」が読めないため。
+   */
+  private faceCell(cell: CellPos, dt: number): void {
+    // 着座中は椅子の向きを保つ
+    if (this.player.seated) return;
+    // 移動中は進行方向を向く（Player 側が yaw を更新する）ので邪魔しない
+    if (this.player.horizontalSpeed > 0.15) return;
+
+    const dx = cell.x + 0.5 - this.player.x;
+    const dz = cell.z + 0.5 - this.player.z;
+    // 足元のセルを狙っているときは向きが定まらないので変えない
+    if (Math.hypot(dx, dz) < 0.2) return;
+
+    const t = 1 - Math.exp(-TURN_RATE * dt);
+    this.player.yaw = approachAngle(this.player.yaw, yawTowards(dx, dz), t);
   }
 
   // ---------------------------------------------------------------- 保存

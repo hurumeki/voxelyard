@@ -11,7 +11,23 @@ import { World } from '../src/game/world.ts';
 import { Player } from '../src/physics/player.ts';
 import { raycastWorld } from '../src/game/raycast.ts';
 import { buildExport, exportFilename, importWorld, sanitizeFilename } from '../src/storage/worldIO.ts';
-import { CELL_COUNT, cellIndex, indexToCell } from '../src/core/coords.ts';
+import {
+  CELL_COUNT,
+  approachAngle,
+  cellIndex,
+  indexToCell,
+  normalizeAngle,
+  yawTowards,
+} from '../src/core/coords.ts';
+import {
+  GHOST_COLOR_BLOCKED_BY_PLAYER,
+  GHOST_COLOR_INVALID,
+  GHOST_COLOR_OK,
+  ghostColorFor,
+  placeFailMessage,
+} from '../src/game/placeFeedback.ts';
+import { MOVE_ZONE_RATIO, isInMoveZone } from '../src/input/moveZone.ts';
+import type { PlaceFailure } from '../src/game/world.ts';
 import type { WorldMeta } from '../src/storage/db.ts';
 
 const META: WorldMeta = {
@@ -398,4 +414,83 @@ test('120Hz のフレームでもジャンプ入力を取りこぼさない', ()
   }
   // 通常ブロック1段（1m）を越える高さまで跳べていること
   assert.ok(maxY > 1.0, `ジャンプが取りこぼされている maxY=${maxY}`);
+});
+
+// ---------------------------------------------------------------- 設置フィードバック
+
+test('設置できない理由はすべて説明文を持つ', () => {
+  // ここに列挙していない理由が PlaceFailure に増えると型エラーになる
+  const ALL: Record<PlaceFailure, true> = {
+    occupied: true,
+    'out-of-bounds': true,
+    'no-support': true,
+    'player-overlap': true,
+    'out-of-reach': true,
+    'unknown-block': true,
+  };
+  for (const reason of Object.keys(ALL) as PlaceFailure[]) {
+    assert.ok(placeFailMessage(reason).length > 0, `${reason} の文言がない`);
+  }
+});
+
+test('ゴーストの色はプレイヤーが原因のときだけ別色になる', () => {
+  assert.equal(ghostColorFor(null), GHOST_COLOR_OK);
+  assert.equal(ghostColorFor('player-overlap'), GHOST_COLOR_BLOCKED_BY_PLAYER);
+  assert.equal(ghostColorFor('no-support'), GHOST_COLOR_INVALID);
+  assert.equal(ghostColorFor('occupied'), GHOST_COLOR_INVALID);
+});
+
+test('world.canPlace が返した理由をそのまま文言にできる', () => {
+  const w = new World();
+  const p = new Player();
+  p.reset(10.5, 0, 10.5, 0);
+  const check = w.canPlace('wood_natural', { x: 10, y: 0, z: 10 }, 0, p.box());
+  assert.equal(check.ok, false);
+  if (!check.ok) assert.equal(placeFailMessage(check.reason), '自分が邪魔で置けません');
+});
+
+// ---------------------------------------------------------------- 向きの計算
+
+test('yawTowards は -Z を正面とする', () => {
+  const EPS = 1e-9;
+  assert.ok(Math.abs(yawTowards(0, -1) - 0) < EPS);
+  assert.ok(Math.abs(yawTowards(1, 0) - -Math.PI / 2) < EPS);
+  assert.ok(Math.abs(yawTowards(-1, 0) - Math.PI / 2) < EPS);
+  assert.ok(Math.abs(Math.abs(yawTowards(0, 1)) - Math.PI) < EPS);
+});
+
+test('向き直りは近い方へ回る', () => {
+  // +3.0rad から -3.0rad へは、差 -6.0 ではなく +0.28 側が近い
+  const next = approachAngle(3.0, -3.0, 1);
+  assert.ok(next > 3.0, `遠回りしている next=${next}`);
+  assert.ok(Math.abs(normalizeAngle(next) - -3.0) < 1e-9);
+
+  // 補間の割合どおりに近づく
+  assert.ok(Math.abs(approachAngle(0, Math.PI / 2, 0.5) - Math.PI / 4) < 1e-9);
+  assert.ok(Math.abs(approachAngle(1.2, 1.2, 1) - 1.2) < 1e-9);
+});
+
+// ---------------------------------------------------------------- 移動エリア
+
+test('移動スティックは画面左下の一角だけで起動する', () => {
+  // iPad Pro 12.9" 横向き相当。surface が画面いっぱいとは限らないので left/top も与える
+  const rect = { left: 20, top: 10, width: 1366, height: 1024 };
+  const zoneX = rect.left + rect.width * MOVE_ZONE_RATIO;
+  const zoneY = rect.top + rect.height * (1 - MOVE_ZONE_RATIO);
+
+  // 左下の隅は移動
+  assert.ok(isInMoveZone(rect.left + 40, rect.top + rect.height - 40, rect));
+  // 画面中央のタップはブロック操作（これが今回の修正点）
+  assert.ok(!isInMoveZone(rect.left + rect.width / 2, rect.top + rect.height / 2, rect));
+  // 左半分でも上寄り・中段ならブロック操作
+  assert.ok(!isInMoveZone(rect.left + 40, rect.top + 40, rect));
+  assert.ok(!isInMoveZone(rect.left + 40, rect.top + rect.height / 2, rect));
+  // 右下（ジャンプ・ホットバー側）も移動ではない
+  assert.ok(!isInMoveZone(rect.left + rect.width - 40, rect.top + rect.height - 40, rect));
+
+  // 境界は移動エリアに含めない
+  assert.ok(!isInMoveZone(zoneX, rect.top + rect.height - 1, rect));
+  assert.ok(isInMoveZone(zoneX - 1, rect.top + rect.height - 1, rect));
+  assert.ok(!isInMoveZone(rect.left + 1, zoneY, rect));
+  assert.ok(isInMoveZone(rect.left + 1, zoneY + 1, rect));
 });
